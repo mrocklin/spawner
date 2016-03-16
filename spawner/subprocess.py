@@ -1,40 +1,100 @@
-import subprocess
 import os
+import tempfile
+from threading import Thread, Event
 
-from . import core
+import tornado.process
+from tornado.ioloop import IOLoop
 
-class Job(core.Job):
-    def __init__(self, spawner, process):
+
+def start_process(args, directory, io_loop=None):
+    cmd = ("cd %s;" % directory +
+           " ".join(args) +
+           " > log.out 2> log.err & " +
+           "echo $! > pid && " +
+           "echo start > status")
+    return tornado.process.Subprocess(cmd, shell=True, io_loop=io_loop)
+
+
+def do_nothing():
+    pass
+
+
+class Job(object):
+    """ A single user defined job """
+    def __init__(self, spawner, args, directory=None, on_start=do_nothing,
+            on_finish=do_nothing):
         self.spawner = spawner
-        self.process = process
+        self.args = args
+        self.on_start = on_start
+        self.on_finish = on_finish
+        self.directory = directory or tempfile.mkdtemp(prefix='spawner-')
+        self.process = start_process(self.args, self.directory, self.io_loop)
+        on_start()  # we start immediately, no waiting involved
+        self.done_event = Event()
+        self.status = 'running'
+
+        def done_status():
+            self.status = 'finished'
+
+        self.process.set_exit_callback(lambda _: [on_finish(),
+                                                  done_status(),
+                                                  self.done_event.set()])
 
     def kill(self):
-        self.process.kill()
+        try:
+            self.process.proc.kill()
+        except OSError:
+            pass
         self.spawner.jobs.remove(self)
 
-    @property
-    def stdout(self):
-        return self.process.stdout
+    def get_stdout(self):
+        with open(os.path.join(self.directory, 'log.out')) as f:
+            for line in f:
+                yield line.rstrip()
 
-    @property
-    def stderr(self):
-        return self.process.stderr
+    def get_stderr(self):
+        with open(os.path.join(self.directory, 'log.err')) as f:
+            for line in f:
+                yield line.rstrip()
 
     def id(self):
         return self.process.pid
 
     @property
-    def status(self):
-        try:
-            os.kill(self.process.pid, 0)  # http://stackoverflow.com/a/568285/616616
-        except OSError:
-            return 'finished'
-        else:
-            return 'running'
+    def io_loop(self):
+        return self.spawner.io_loop
+
+    def join(self):
+        self.done_event.wait()
 
 
-class SubProcess(core.Spawner):
+class LocalProcessSpawner(object):
+    """ Context to create and manage local jobs """
     Job = Job
-    def _spawn(self, args):
-        return subprocess.Popen(args, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE)
+    def __init__(self, io_loop=None, directory=None):
+        self.jobs = set()
+        self.io_loop = io_loop or IOLoop()
+        if not self.io_loop._running:
+            self._io_loop_thread = Thread(target=self.io_loop.start)
+            self._io_loop_thread.daemon = True
+            self._io_loop_thread.start()
+        while not self.io_loop._running:
+            sleep(0.001)
+
+    def spawn(self, args, on_start=do_nothing, on_finish=do_nothing):
+        job = Job(self, args, on_start=on_start, on_finish=on_finish)
+        self.jobs.add(job)
+        return job
+
+    def close(self):
+        for job in list(self.jobs):
+            job.kill()
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
