@@ -13,7 +13,8 @@ def start_process(args, directory, io_loop=None):
            " ".join(args) +
            " > log.out 2> log.err & " +
            "echo $! > pid && " +
-           "echo start > status")
+           "echo start > status && "
+           "wait $(cat pid)")
     return tornado.process.Subprocess(cmd, shell=True, io_loop=io_loop)
 
 

@@ -1,6 +1,8 @@
 from spawner import LocalProcessSpawner
 import pytest
 
+from time import sleep
+
 
 def test_LocalProcessSpawner():
     s = LocalProcessSpawner()
@@ -36,3 +38,20 @@ def test_LocalProcessSpawner():
 
     a.kill()
     b.kill()
+
+
+def test_finish_correct_time():
+    s = LocalProcessSpawner()
+
+    L = []
+    def append():
+        L.append(None)
+
+    job = s.spawn(['sleep', '1'], on_start=append, on_finish=append)
+    sleep(0.5)
+    assert len(L) == 1
+    assert job.status != 'finished'
+    for i in range(10):
+        sleep(0.1)
+    assert job.status == 'finished'
+    assert len(L) == 2
